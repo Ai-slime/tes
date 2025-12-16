@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from app.service.git import check_for_updates
 load_dotenv()
 
-import sys, json
+import sys, json, os
 from datetime import datetime
 from app.menus.util import clear_screen, pause
 from app.client.engsel import (
@@ -37,6 +37,41 @@ from app.console import console, print_cyber_panel, cyber_input, loading_animati
 
 WIDTH = 55
 
+def _get_name_from_refresh_file(number):
+    """
+    Read refresh-tokens.json and return the 'name' for the given number if present.
+    Fallback to AuthInstance.refresh_tokens if file not present or parsing fails.
+    """
+    try:
+        if os.path.exists("refresh-tokens.json"):
+            with open("refresh-tokens.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for entry in data:
+                    # number in file may be int or string
+                    try:
+                        entry_number = int(entry.get("number")) if entry.get("number") is not None else None
+                    except Exception:
+                        entry_number = None
+                    if entry_number == int(number):
+                        name = entry.get("name", "") or entry.get("display_name", "") or ""
+                        return name
+    except Exception:
+        pass
+
+    # fallback: use in-memory AuthInstance refresh_tokens
+    try:
+        for rt in AuthInstance.refresh_tokens:
+            try:
+                rt_num = int(rt.get("number", -1))
+            except Exception:
+                rt_num = -1
+            if rt_num == int(number):
+                return rt.get("name", "") or ""
+    except Exception:
+        pass
+
+    return ""
+
 def show_main_menu(profile):
     clear_screen()
 
@@ -48,6 +83,8 @@ def show_main_menu(profile):
     profile_table.add_column("Value", style="bold white")
 
     profile_table.add_row("Nomor:", str(profile['number']))
+    # NEW: show account name if available
+    profile_table.add_row("Nama Akun:", str(profile.get('account_name', 'N/A')))
     profile_table.add_row("Type:", str(profile['subscription_type']))
     profile_table.add_row("Pulsa:", f"Rp {profile['balance']}")
     profile_table.add_row("Aktif s/d:", str(expired_at_dt))
@@ -116,13 +153,23 @@ def main():
                     current_point = tiering_data.get("current_point", 0)
                     point_info = f"Points: {current_point} | Tier: {tier}"
             
+            # Get friendly account name directly from refresh-tokens.json (preferred)
+            account_name = ""
+            try:
+                account_name = _get_name_from_refresh_file(active_user.get("number", ""))
+                if not account_name:
+                    account_name = ""
+            except Exception:
+                account_name = ""
+
             profile = {
                 "number": active_user["number"],
                 "subscriber_id": active_user["subscriber_id"],
                 "subscription_type": active_user["subscription_type"],
                 "balance": balance_remaining,
                 "balance_expired_at": balance_expired_at,
-                "point_info": point_info
+                "point_info": point_info,
+                "account_name": account_name
             }
 
             show_main_menu(profile)
