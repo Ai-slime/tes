@@ -19,6 +19,26 @@ from app.console import console, print_cyber_panel, cyber_input, loading_animati
 from rich.table import Table
 from rich.panel import Panel
 
+def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str = "█", empty_char: str = "░"):
+    """
+    Simple text progress bar. used = total - remaining
+    Returns string like: [████░░░░] 34%
+    """
+    try:
+        if total <= 0:
+            # when total unknown or zero, show empty bar
+            pct = 0
+            bar = empty_char * width
+        else:
+            used_clamped = max(0, min(used, total))
+            frac = used_clamped / total
+            filled = int(round(frac * width))
+            bar = fill_char * filled + empty_char * (width - filled)
+            pct = int(round(frac * 100))
+        return f"[{bar}] {pct}%"
+    except Exception:
+        return f"[{empty_char * width}] 0%"
+
 def show_package_details(api_key, tokens, package_option_code, is_enterprise, option_order = -1):
     active_user = AuthInstance.active_user
     subscription_type = active_user.get("subscription_type", "")
@@ -81,48 +101,42 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
 
     benefits = package["package_option"]["benefits"]
     if benefits and isinstance(benefits, list):
-        benefit_table = Table(show_header=True, header_style="neon_pink", box=None)
-        benefit_table.add_column("Benefit Name", style="white")
-        benefit_table.add_column("Total/Quota", style="neon_green")
-        benefit_table.add_column("Type", style="dim")
+        benefit_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0,1))
+        benefit_table.add_column("Nama Benefit", style="white")
+        benefit_table.add_column("Jenis", style="dim", width=10)
+        benefit_table.add_column("Kuota", style="neon_green")
+        benefit_table.add_column("Progress", style="neon_green")
 
         for benefit in benefits:
             total_display = ""
-            data_type = benefit['data_type']
-            if data_type == "VOICE" and benefit['total'] > 0:
-                total_display = f"{benefit['total']/60} menit"
-            elif data_type == "TEXT" and benefit['total'] > 0:
-                total_display = f"{benefit['total']} SMS"
-            elif data_type == "DATA" and benefit['total'] > 0:
-                if benefit['total'] > 0:
-                    quota = int(benefit['total'])
-                    # It is in byte, make it in GB
-                    if quota >= 1_000_000_000:
-                        quota_gb = quota / (1024 ** 3)
-                        total_display = f"{quota_gb:.2f} GB"
-                    elif quota >= 1_000_000:
-                        quota_mb = quota / (1024 ** 2)
-                        total_display = f"{quota_mb:.2f} MB"
-                    elif quota >= 1_000:
-                        quota_kb = quota / 1024
-                        total_display = f"{quota_kb:.2f} KB"
-                    else:
-                        total_display = f"{quota} B"
-            elif data_type not in ["DATA", "VOICE", "TEXT"]:
-                total_display = f"{benefit['total']}"
-            
-            if benefit["is_unlimited"]:
-                total_display = "Unlimited"
+            data_type = benefit.get('data_type', '')
+            remaining = benefit.get('remaining', benefit.get('total', 0))
+            total = benefit.get('total', 0)
+            used = (total - remaining) if total is not None else 0
 
-            benefit_table.add_row(benefit['name'], total_display, data_type)
+            # Format total_display using format_quota_byte for DATA, else unit fallback
+            if data_type == "DATA":
+                total_display = f"{format_quota_byte(remaining)} / {format_quota_byte(total)}"
+            elif data_type == "VOICE":
+                total_display = f"{remaining/60:.1f}m / {total/60:.1f}m"
+            elif data_type == "TEXT":
+                total_display = f"{remaining} / {total} SMS"
+            else:
+                total_display = f"{remaining} / {total}"
+
+            if benefit.get("is_unlimited", False):
+                total_display = "Unlimited"
+                progress = _render_progress_bar(0, 1, width=20)
+            else:
+                progress = _render_progress_bar(used, total, width=20)
+
+            benefit_table.add_row(benefit.get('name',"N/A"), data_type, total_display, progress)
 
         print_cyber_panel(benefit_table, title="BENEFITS")
     
     with loading_animation("Checking addons..."):
         addons = get_addons(api_key, tokens, package_option_code)
     
-    # print(f"Addons:\n{json.dumps(addons, indent=2)}") # Reduced noise
-
     console.print(Panel(detail, title="[neon_pink]SnK MyXL[/]", border_style="dim white"))
     
     in_package_detail_menu = True
@@ -620,7 +634,7 @@ def fetch_my_packages():
         
         clear_screen()
 
-        # --- NEW: Paket Aktif header like screenshot ---
+        # --- Paket Aktif header ---
         try:
             active_user = AuthInstance.get_active_user() or {}
             account_number = active_user.get("number", "N/A")
@@ -636,59 +650,91 @@ def fetch_my_packages():
         my_packages = []
         num = 1
 
-        # Using Columns or a Grid might be too cluttered if many packages.
-        # Let's stick to a Table or sequence of Panels.
-        # Since user wants "cool", let's use a main Table for the list,
-        # but the details are complex.
+        # If quotas list empty
+        if not quotas:
+            console.print("[warning]No packages found.[/]")
+            pause()
+            return None
 
-        # Let's verify content first.
-
-        main_table = Table(show_header=True, header_style="neon_pink", box=None)
-        main_table.add_column("No", style="neon_green", justify="right", width=4)
-        main_table.add_column("Package Name", style="bold white")
-        main_table.add_column("Quota Info", style="cyan")
-        main_table.add_column("Exp", style="dim")
-
+        # Show detailed panels for each quota (mendekati tampilan screenshot)
         for quota in quotas:
-            quota_code = quota["quota_code"]
-            quota_name = quota["name"]
-            
+            quota_code = quota.get("quota_code", "")
+            quota_name = quota.get("name", "")
             product_subscription_type = quota.get("product_subscription_type", "")
             product_domain = quota.get("product_domain", "")
-            
-            # Summarize benefits for table view
+
+            # Try to extract extra meta if available
+            family_code = quota.get("family_code", quota.get("package_family_code", ""))
+            group_code = quota.get("group_code", quota.get("package_group_code", ""))
+
+            active_since = quota.get("activated_at", quota.get("active_since", ""))
+            reset_at = quota.get("reset_at", quota.get("reset_quota_at", ""))
+
+            # Detail panel similar to screenshot top block
+            detail_tbl = Table(show_header=False, box=None, padding=(0,1))
+            detail_tbl.add_column("Key", style="neon_cyan", justify="right")
+            detail_tbl.add_column("Value", style="bold white")
+
+            detail_tbl.add_row("Nama:", quota_name)
+            detail_tbl.add_row("Quota Code:", quota_code)
+            if family_code:
+                detail_tbl.add_row("Family Code:", family_code)
+            if group_code:
+                detail_tbl.add_row("Group Code:", group_code)
+            if active_since:
+                detail_tbl.add_row("Aktif Sejak:", str(active_since))
+            if reset_at:
+                detail_tbl.add_row("Reset Kuota:", str(reset_at))
+
+            # Benefits table with progress bars
             benefits = quota.get("benefits", [])
-            summary = "No benefits"
-            if benefits:
-                b = benefits[0] # Take first benefit as summary
-                data_type = b.get("data_type", "")
-                remaining = b.get("remaining", 0)
-                total = b.get("total", 0)
+            benefit_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0,1))
+            benefit_table.add_column("Nama", style="white")
+            benefit_table.add_column("Jenis", style="dim", width=12)
+            benefit_table.add_column("Kuota", style="neon_green")
+            benefit_table.add_column("Progress", style="neon_green")
 
-                if data_type == "DATA":
-                     summary = f"{format_quota_byte(remaining)} / {format_quota_byte(total)}"
-                elif data_type == "VOICE":
-                     summary = f"{remaining/60:.1f}m / {total/60:.1f}m"
-                else:
-                     summary = f"{remaining} / {total} {data_type}"
+            if not benefits:
+                benefit_table.add_row("No benefits", "", "", "")
+            else:
+                for b in benefits:
+                    bname = b.get("name", "Benefit")
+                    dtype = b.get("data_type", "")
+                    remaining = b.get("remaining", b.get("total", 0))
+                    total = b.get("total", 0)
+                    used = (total - remaining) if isinstance(total, (int,float)) else 0
 
-                if len(benefits) > 1:
-                    summary += f" (+{len(benefits)-1} more)"
+                    if dtype == "DATA":
+                        kuota_text = f"{format_quota_byte(remaining)} / {format_quota_byte(total)}"
+                    elif dtype == "VOICE":
+                        kuota_text = f"{remaining/60:.2f}m / {total/60:.2f}m"
+                    elif dtype == "TEXT":
+                        kuota_text = f"{remaining} / {total} SMS"
+                    else:
+                        kuota_text = f"{remaining} / {total}"
 
-            main_table.add_row(str(num), quota_name, summary, "")
-            
+                    if b.get("is_unlimited", False):
+                        kuota_text = "Unlimited"
+                        progress = _render_progress_bar(0, 1, width=20)
+                    else:
+                        progress = _render_progress_bar(used, total, width=20)
+
+                    benefit_table.add_row(bname, dtype, kuota_text, progress)
+
+            # Print panels
+            print_cyber_panel(detail_tbl, title=f"PAKET {num}")
+            print_cyber_panel(benefit_table, title="RINCIAN KUOTA")
+
             my_packages.append({
                 "number": num,
                 "name": quota_name,
                 "quota_code": quota_code,
                 "product_subscription_type": product_subscription_type,
                 "product_domain": product_domain,
-                "full_data": quota # Store full data for detailed view if needed
+                "full_data": quota
             })
             num += 1
 
-        print_cyber_panel(main_table, title="MY PACKAGES")
-        
         console.print(Panel(
             """[bold white]Input Number[/]: View Detail
 [bold white]del <N>[/]: Unsubscribe
@@ -701,7 +747,7 @@ def fetch_my_packages():
         if choice == "00":
             in_my_packages_menu = False
 
-        # Handle seletcting package to view detail
+        # Handle selecting package to view detail
         if choice.isdigit() and int(choice) > 0 and int(choice) <= len(my_packages):
             selected_pkg = next((pkg for pkg in my_packages if pkg["number"] == int(choice)), None)
             if not selected_pkg:
@@ -709,7 +755,7 @@ def fetch_my_packages():
                 pause()
                 continue
             
-            # Show full details
+            # Show full details (will open API detail view)
             _ = show_package_details(api_key, tokens, selected_pkg["quota_code"], False)
         
         elif choice.startswith("del "):
