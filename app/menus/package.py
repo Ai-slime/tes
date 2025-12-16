@@ -27,46 +27,30 @@ from app.console import console, print_cyber_panel, cyber_input, loading_animati
 from rich.table import Table
 from rich.panel import Panel
 
-def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str = "█", empty_char: str = "░"):
-    """
-    Colored ASCII progress bar using rich markup.
-    - green if >=50%
-    - yellow if between 20-50%
-    - red if <20%
-    Returns markup string containing colored filled portion and dim empty portion plus percent.
-    """
-    try:
-        if not isinstance(total, (int, float)) or total <= 0:
-            bar = empty_char * width
-            return f"[dim]{bar}[/] N/A"
-        used_clamped = max(0, min(used, total))
-        frac = used_clamped / total
-        filled = int(round(frac * width))
-        filled_part = fill_char * filled
-        empty_part = empty_char * (width - filled)
-
-        pct = int(round(frac * 100))
-        if pct >= 50:
-            color = "neon_green"
-        elif pct >= 20:
-            color = "neon_yellow"
-        else:
-            color = "red"
-
-        return f"[{color}]{filled_part}[/][dim]{empty_part}[/] {pct}%"
-    except Exception:
-        bar = empty_char * width
-        return f"[dim]{bar}[/] 0%"
+# Indonesian month short names mapping
+_MONTH_ID = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "Mei", 6: "Jun",
+    7: "Jul", 8: "Agu", 9: "Sep", 10: "Okt", 11: "Nov", 12: "Des"
+}
 
 def _format_ts(ts):
+    """
+    Format timestamp to: DD Mon YYYY HH:MM:SS with Indonesian month abbreviations.
+    If ts is already a string, return as-is.
+    """
     try:
         if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(int(ts)).strftime("%d %b %Y %H:%M:%S")
+            dt = datetime.fromtimestamp(int(ts))
+            mon = _MONTH_ID.get(dt.month, dt.strftime("%b"))
+            return f"{dt.day:02d} {mon} {dt.year} {dt.strftime('%H:%M:%S')}"
         return str(ts)
     except Exception:
         return str(ts)
 
 def _days_until(ts):
+    """
+    Return integer days until timestamp ts. If ts not numeric, return None.
+    """
     try:
         if not isinstance(ts, (int, float)):
             return None
@@ -77,9 +61,59 @@ def _days_until(ts):
     except Exception:
         return None
 
+def _get_bar_width(min_w: int = 12, max_w: int = 48, reserved: int = 60) -> int:
+    """
+    Calculate a flexible bar width based on current console width.
+    reserved: approximate width taken by other columns in the table/panel.
+    """
+    try:
+        total = console.size.width or 80
+        avail = max(10, total - reserved)
+        return max(min_w, min(max_w, avail))
+    except Exception:
+        return min_w
+
+def _render_progress_bar(used: int, total: int, width: int | None = None, fill_char: str = "█", empty_char: str = "░"):
+    """
+    Render an ASCII progress bar with colored filled part using rich markup.
+    - width: if None, computed adaptively via _get_bar_width()
+    - returns markup string: colored filled, dim empty, and percent
+    Color thresholds:
+      pct >= 50 => neon_green
+      20 <= pct < 50 => neon_yellow
+      pct < 20 => red
+    """
+    try:
+        if width is None:
+            width = _get_bar_width()
+
+        if not isinstance(total, (int, float)) or total <= 0:
+            bar = empty_char * width
+            return f"[dim]{bar}[/] N/A"
+
+        used_clamped = max(0, min(used, total))
+        frac = used_clamped / total
+        filled = int(round(frac * width))
+        filled_part = fill_char * filled
+        empty_part = empty_char * (width - filled)
+        pct = int(round(frac * 100))
+
+        if pct >= 50:
+            color = "neon_green"
+        elif pct >= 20:
+            color = "neon_yellow"
+        else:
+            color = "red"
+
+        # return colored filled and dim empty
+        return f"[{color}]{filled_part}[/][dim]{empty_part}[/] {pct}%"
+    except Exception:
+        bar = empty_char * (width or 12)
+        return f"[dim]{bar}[/] 0%"
+
 def show_package_details(api_key, tokens, package_option_code, is_enterprise, option_order = -1):
     active_user = AuthInstance.active_user
-    subscription_type = active_user.get("subscription_type", "")
+    subscription_type = active_user.get("subscription_type", "") if active_user else ""
     
     clear_screen()
 
@@ -91,9 +125,9 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
         pause()
         return False
 
-    price = package["package_option"]["price"]
-    detail = display_html(package["package_option"]["tnc"])
-    validity = package["package_option"]["validity"]
+    price = package["package_option"].get("price", "")
+    detail = display_html(package["package_option"].get("tnc", ""))
+    validity = package["package_option"].get("validity", "")
 
     option_name = package.get("package_option", {}).get("name","")
     family_name = package.get("package_family", {}).get("name","")
@@ -101,14 +135,13 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
     
     title = f"{family_name} - {variant_name} - {option_name}".strip()
     
-    # family_code removed from details view per request
     parent_code = package.get("package_addon", {}).get("parent_code","")
     if parent_code == "":
         parent_code = "N/A"
     
-    token_confirmation = package["token_confirmation"]
-    ts_to_sign = package["timestamp"]
-    payment_for = package["package_family"]["payment_for"]
+    token_confirmation = package.get("token_confirmation", "")
+    ts_to_sign = package.get("timestamp", "")
+    payment_for = package.get("package_family", {}).get("payment_for", "")
     
     payment_items = [
         PaymentItem(
@@ -130,15 +163,25 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
     details_table.add_row("Harga:", f"Rp {price}")
     details_table.add_row("Payment For:", str(payment_for))
     details_table.add_row("Masa Aktif Paket:", str(validity))
-    details_table.add_row("Point:", str(package['package_option']['point']))
-    details_table.add_row("Plan Type:", package['package_family']['plan_type'])
+    details_table.add_row("Point:", str(package.get('package_option', {}).get('point', "")))
+    details_table.add_row("Plan Type:", package.get('package_family', {}).get('plan_type', ""))
     # show package option code in yellow (highlight)
     details_table.add_row("Kode Paket:", f"[neon_yellow]{package_option_code}[/]")
     details_table.add_row("Parent Code:", parent_code)
 
-    # Try to display Masa Aktif Kuota and Akhir Reset Kuota if present in payload
-    activated_ts = package.get("activated_at") or package.get("active_since") or package.get("package_option", {}).get("activated_at") or package.get("package_option", {}).get("active_since")
-    reset_ts = package.get("reset_at") or package.get("reset_quota_at") or package.get("package_option", {}).get("reset_at") or package.get("package_option", {}).get("reset_quota_at")
+    # Masa Aktif Kuota and Reset Kuota if provided
+    activated_ts = (
+        package.get("activated_at")
+        or package.get("active_since")
+        or package.get("package_option", {}).get("activated_at")
+        or package.get("package_option", {}).get("active_since")
+    )
+    reset_ts = (
+        package.get("reset_at")
+        or package.get("reset_quota_at")
+        or package.get("package_option", {}).get("reset_at")
+        or package.get("package_option", {}).get("reset_quota_at")
+    )
 
     if activated_ts:
         details_table.add_row("Masa Aktif Kuota:", _format_ts(activated_ts))
@@ -151,27 +194,30 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
 
     print_cyber_panel(details_table, title="DETAIL PAKET")
 
-    benefits = package["package_option"]["benefits"]
+    benefits = package.get("package_option", {}).get("benefits", [])
     if benefits and isinstance(benefits, list):
         benefit_table = Table(show_header=True, header_style="neon_pink", box=None)
         benefit_table.add_column("Benefit Name", style="white")
         benefit_table.add_column("Total/Quota", style="neon_green")
-        benefit_table.add_column("Type", style="dim")
+        benefit_table.add_column("Type", style="dim", width=12)
         benefit_table.add_column("Progress", style="neon_green")
+
+        # determine a good width for bar once per table render
+        bar_width = _get_bar_width()
 
         for benefit in benefits:
             total_display = ""
             data_type = benefit.get('data_type', '')
-            remaining = benefit.get('remaining', benefit.get('total', 0))
-            total = benefit.get('total', 0)
+            remaining = benefit.get('remaining', benefit.get('total', 0)) or 0
+            total = benefit.get('total', 0) or 0
             used = (total - remaining) if isinstance(total, (int, float)) else 0
 
             if data_type == "VOICE" and benefit.get('total', 0) > 0:
-                total_display = f"{benefit['total']/60} menit"
+                total_display = f"{benefit.get('total', 0)/60:.2f} menit"
             elif data_type == "TEXT" and benefit.get('total', 0) > 0:
-                total_display = f"{benefit['total']} SMS"
+                total_display = f"{benefit.get('total', 0)} SMS"
             elif data_type == "DATA" and benefit.get('total', 0) > 0:
-                quota = int(benefit['total'])
+                quota = int(benefit.get('total', 0))
                 # It is in byte, make it in GB/MB/KB
                 if quota >= 1_000_000_000:
                     quota_gb = quota / (1024 ** 3)
@@ -184,24 +230,24 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
                     total_display = f"{quota_kb:.2f} KB"
                 else:
                     total_display = f"{quota} B"
-            elif data_type not in ["DATA", "VOICE", "TEXT"]:
-                total_display = f"{benefit.get('total', 0)}"
-            
+            else:
+                total_display = f"{remaining} / {total}"
+
             if benefit.get("is_unlimited", False):
                 total_display = "Unlimited"
-                progress = _render_progress_bar(0, 1, width=20)
+                progress = _render_progress_bar(0, 1, width=bar_width)
             else:
-                progress = _render_progress_bar(used, total, width=20)
+                progress = _render_progress_bar(used, total, width=bar_width)
 
-            benefit_table.add_row(benefit.get('name'), total_display, data_type, progress)
+            benefit_table.add_row(benefit.get('name', 'N/A'), total_display, data_type, progress)
 
         print_cyber_panel(benefit_table, title="BENEFITS")
-    
+
     with loading_animation("Checking addons..."):
         addons = get_addons(api_key, tokens, package_option_code)
-    
-    console.print(Panel(detail, title="[neon_pink]SnK MyXL[/]", border_style="dim white"))
-    
+
+    console.print(Panel(detail or "No terms available.", title="[neon_pink]SnK MyXL[/]", border_style="dim white"))
+
     in_package_detail_menu = True
     while in_package_detail_menu:
         # Options Menu
@@ -693,7 +739,7 @@ def fetch_my_packages():
             pause()
             return None
         
-        quotas = res["data"]["quotas"]
+        quotas = res["data"].get("quotas", [])
         
         clear_screen()
 
@@ -727,7 +773,6 @@ def fetch_my_packages():
             product_domain = quota.get("product_domain", "")
 
             # Try to extract extra meta if available
-            family_code = quota.get("family_code", quota.get("package_family_code", ""))
             group_code = quota.get("group_code", quota.get("package_group_code", ""))
 
             active_since = quota.get("activated_at", quota.get("active_since", ""))
@@ -759,14 +804,17 @@ def fetch_my_packages():
             benefit_table.add_column("Kuota", style="neon_green")
             benefit_table.add_column("Progress", style="neon_green")
 
+            # compute bar width adaptively
+            bar_width = _get_bar_width()
+
             if not benefits:
                 benefit_table.add_row("No benefits", "", "", "")
             else:
                 for b in benefits:
                     bname = b.get("name", "Benefit")
                     dtype = b.get("data_type", "")
-                    remaining = b.get("remaining", b.get("total", 0))
-                    total = b.get("total", 0)
+                    remaining = b.get("remaining", b.get("total", 0)) or 0
+                    total = b.get("total", 0) or 0
                     used = (total - remaining) if isinstance(total, (int,float)) else 0
 
                     if dtype == "DATA":
@@ -780,9 +828,9 @@ def fetch_my_packages():
 
                     if b.get("is_unlimited", False):
                         kuota_text = "Unlimited"
-                        progress = _render_progress_bar(0, 1, width=20)
+                        progress = _render_progress_bar(0, 1, width=bar_width)
                     else:
-                        progress = _render_progress_bar(used, total, width=20)
+                        progress = _render_progress_bar(used, total, width=bar_width)
 
                     benefit_table.add_row(bname, dtype, kuota_text, progress)
 
