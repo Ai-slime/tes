@@ -1,4 +1,3 @@
-# NOTE: url is placeholder; replace file in repo accordingly
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -67,6 +66,44 @@ def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str 
         bar = empty_char * width
         return f"[dim]{bar}[/] 0%"
 
+def _render_profile_bar(remaining: int, total: int, width: int = 30, fill_char: str = "█", empty_char: str = "░"):
+    """
+    Render profile bar based on remaining/total (SISA kuota).
+    Color thresholds (based on remaining %):
+      >=100% => neon_green
+      >=70%  => orange1
+      >=40%  => neon_yellow
+      >=20%  => red
+      <20%   => red
+    """
+    try:
+        if not isinstance(total, (int, float)) or total <= 0:
+            bar = empty_char * width
+            return f"[dim]{bar}[/] N/A"
+        remaining_clamped = max(0, min(remaining, total))
+        frac = remaining_clamped / total
+        filled = int(round(frac * width))
+        filled_part = fill_char * filled
+        empty_part = empty_char * (width - filled)
+        pct = int(round(frac * 100))
+
+        # color selection per your request
+        if pct >= 100:
+            color = "neon_green"
+        elif pct >= 70:
+            color = "orange1"
+        elif pct >= 40:
+            color = "neon_yellow"
+        elif pct >= 20:
+            color = "red"
+        else:
+            color = "red"
+
+        return f"[{color}]{filled_part}[/][dim]{empty_part}[/] {pct}%"
+    except Exception:
+        bar = empty_char * width
+        return f"[dim]{bar}[/] 0%"
+
 def _get_quotas_summary(api_key, tokens):
     try:
         id_token = tokens.get("id_token")
@@ -105,7 +142,7 @@ def show_main_menu(profile):
     profile_table.add_row("Aktif s/d:", str(expired_at_dt))
     profile_table.add_row("Info:", str(profile['point_info']))
 
-    # Sisa semua kuota: angka (baris 1) + bar flex di baris 2
+    # Sisa semua kuota: angka (baris 1) + bar flex di baris 2 (menggunakan remaining%)
     try:
         api_key = AuthInstance.api_key
         tokens = AuthInstance.get_active_tokens()
@@ -116,9 +153,9 @@ def show_main_menu(profile):
                 if total_bytes > 0:
                     formatted_numbers = f"{format_quota_byte(remaining_bytes)} / {format_quota_byte(total_bytes)}"
                     profile_table.add_row("Sisa Semua Kuota:", formatted_numbers)
-                    # bar below (centered)
+                    # bar below (centered) using remaining%
                     bar_width = _get_bar_width_for_profile()
-                    bar = _render_progress_bar(total_bytes - remaining_bytes, total_bytes, width=bar_width)
+                    bar = _render_profile_bar(remaining_bytes, total_bytes, width=bar_width)
                     profile_table.add_row("", Align(bar, align="center"))
                 else:
                     profile_table.add_row("Sisa Semua Kuota:", "N/A")
