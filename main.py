@@ -1,6 +1,5 @@
+# NOTE: url is placeholder; replace file in repo accordingly
 from dotenv import load_dotenv
-
-from app.service.git import check_for_updates
 load_dotenv()
 
 import sys, json, os
@@ -30,18 +29,23 @@ from app.menus.store.redemables import show_redeemables_menu
 from app.client.registration import dukcapil
 #from app.client.sharing import bounty_allotment_menu
 
-# NEW IMPORTS FOR UI
 from rich.table import Table
 from rich.columns import Columns
 from rich.panel import Panel
+from rich.align import Align
 from app.console import console, print_cyber_panel, cyber_input, loading_animation, print_step
 
 WIDTH = 55
 
+def _get_bar_width_for_profile(min_w: int = 12, max_w: int = 60, reserved: int = 40) -> int:
+    try:
+        total = console.size.width or 80
+        avail = max(10, total - reserved)
+        return max(min_w, min(max_w, avail))
+    except Exception:
+        return min_w
+
 def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str = "█", empty_char: str = "░"):
-    """
-    Small local progress bar for main profile view. Colored using rich markup.
-    """
     try:
         if not isinstance(total, (int, float)) or total <= 0:
             bar = empty_char * width
@@ -64,10 +68,6 @@ def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str 
         return f"[dim]{bar}[/] 0%"
 
 def _get_quotas_summary(api_key, tokens):
-    """
-    Request quota-details and return tuple (remaining_bytes, total_bytes).
-    Summation only for DATA-type benefits.
-    """
     try:
         id_token = tokens.get("id_token")
         path = "api/v8/packages/quota-details"
@@ -92,7 +92,6 @@ def _get_quotas_summary(api_key, tokens):
 def show_main_menu(profile):
     clear_screen()
 
-    # Profile Table
     expired_at_dt = datetime.fromtimestamp(profile["balance_expired_at"]).strftime("%Y-%m-%d")
 
     profile_table = Table(show_header=False, box=None, padding=(0, 2))
@@ -100,14 +99,13 @@ def show_main_menu(profile):
     profile_table.add_column("Value", style="bold white")
 
     profile_table.add_row("Nomor:", str(profile['number']))
-    # NEW: show account name if available (use active_user name from API first)
     profile_table.add_row("Nama Akun:", str(profile.get('account_name', 'N/A')))
     profile_table.add_row("Type:", str(profile['subscription_type']))
     profile_table.add_row("Pulsa:", f"Rp {profile['balance']}")
     profile_table.add_row("Aktif s/d:", str(expired_at_dt))
     profile_table.add_row("Info:", str(profile['point_info']))
 
-    # --- New: show total DATA quota summary and progress bar ---
+    # Sisa semua kuota: angka (baris 1) + bar flex di baris 2
     try:
         api_key = AuthInstance.api_key
         tokens = AuthInstance.get_active_tokens()
@@ -116,19 +114,20 @@ def show_main_menu(profile):
             if qsum:
                 remaining_bytes, total_bytes = qsum
                 if total_bytes > 0:
-                    formatted = f"{format_quota_byte(remaining_bytes)} / {format_quota_byte(total_bytes)}"
-                    bar = _render_progress_bar(total_bytes - remaining_bytes, total_bytes, width=28)
-                    profile_table.add_row("Sisa Semua Kuota:", f"{formatted} {bar}")
+                    formatted_numbers = f"{format_quota_byte(remaining_bytes)} / {format_quota_byte(total_bytes)}"
+                    profile_table.add_row("Sisa Semua Kuota:", formatted_numbers)
+                    # bar below (centered)
+                    bar_width = _get_bar_width_for_profile()
+                    bar = _render_progress_bar(total_bytes - remaining_bytes, total_bytes, width=bar_width)
+                    profile_table.add_row("", Align(bar, align="center"))
                 else:
                     profile_table.add_row("Sisa Semua Kuota:", "N/A")
     except Exception:
-        # ignore; don't break profile display
+        # fail silently
         pass
-    # --- end quota summary ---
 
     print_cyber_panel(profile_table, title="USER PROFILE")
 
-    # Menu Grid
     menu_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0, 1))
     menu_table.add_column("ID", style="neon_green", justify="right", width=4)
     menu_table.add_column("Action", style="bold white")
@@ -151,9 +150,7 @@ def show_main_menu(profile):
         ("15", "Store Family List"),
         ("16", "Store Packages"),
         ("17", "Redemables"),
-        # ("18", "Simpan Family Code"),  # removed per request
         ("S", "Biz Stat"),
-        #("TF", "Teanfer Pulsa"),
         ("R", "Register Dukcapil"),
         ("N", "Notifikasi"),
         ("V", "Validate MSISDN"),
@@ -169,40 +166,27 @@ def show_main_menu(profile):
 
 show_menu = True
 def main():
-    
     while True:
         active_user = AuthInstance.get_active_user()
 
-        # Logged in
         if active_user is not None:
-            # Use loading animation for fetching data
             with loading_animation("Fetching user data..."):
                 balance = get_balance(AuthInstance.api_key, active_user["tokens"]["id_token"])
                 balance_remaining = balance.get("remaining")
                 balance_expired_at = balance.get("expired_at")
 
                 point_info = "Points: N/A | Tier: N/A"
-
                 if active_user["subscription_type"] == "PREPAID":
                     tiering_data = get_tiering_info(AuthInstance.api_key, active_user["tokens"])
                     tier = tiering_data.get("tier", 0)
                     current_point = tiering_data.get("current_point", 0)
                     point_info = f"Points: {current_point} | Tier: {tier}"
-            
-            # Prefer name from active_user fetched from API (set_active_user stores it)
+
             account_name = ""
             try:
                 account_name = active_user.get("name", "") or ""
             except Exception:
                 account_name = ""
-
-            # fallback: read from refresh-tokens.json if active_user doesn't have name
-            if not account_name:
-                try:
-                    # util function in this file is not needed; fetch from Bookmark/refresh file if needed
-                    account_name = ""
-                except Exception:
-                    account_name = ""
 
             profile = {
                 "number": active_user["number"],
@@ -218,7 +202,6 @@ def main():
 
             choice = cyber_input("Pilih menu")
 
-            # Testing shortcuts
             if choice.lower() == "t":
                 pause()
             elif choice == "1":
@@ -244,8 +227,6 @@ def main():
                 get_packages_by_family("f3303d95-8454-4e80-bb25-38513d358a11")
             elif choice == "7":
                 get_packages_by_family("53de8ac3-521d-43f5-98ce-749ad0481709")
-
-
 
             elif choice == "8":
                 option_code = cyber_input("Enter option code (or '99' to cancel)")
@@ -329,9 +310,6 @@ def main():
                     )
                 console.print_json(data=res)
                 pause()
-
-            elif choice.lower() == "tf":
-                show_bounty_allotment_menu()
             elif choice.lower() == "v":
                 msisdn = cyber_input("Enter the msisdn to validate (628xxxx)")
                 with loading_animation("Validating..."):
@@ -350,24 +328,21 @@ def main():
                 console.print("[error]Invalid choice. Please try again.[/]")
                 pause()
         else:
-            # Not logged in
             selected_user_number = show_account_menu()
             if selected_user_number:
                 AuthInstance.set_active_user(selected_user_number)
             else:
                 console.print("[error]No user selected or failed to load user.[/]")
-                pause() # Added pause so user can read the error
+                pause()
 
 if __name__ == "__main__":
     try:
         print_step("Checking for updates...")
         with loading_animation("Checking git..."):
+            from app.service.git import check_for_updates
             need_update = check_for_updates()
         if need_update:
             pause()
-
         main()
     except KeyboardInterrupt:
         console.print("\n[bold red]Exiting the application.[/]")
-    # except Exception as e:
-    #     console.print(f"[error]An error occurred: {e}[/]")
