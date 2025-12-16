@@ -1,6 +1,5 @@
 import json
 import sys
-from datetime import datetime
 
 import requests
 from app.service.auth import AuthInstance
@@ -39,14 +38,6 @@ def _render_progress_bar(used: int, total: int, width: int = 30, fill_char: str 
         return f"[{bar}] {pct}%"
     except Exception:
         return f"[{empty_char * width}] 0%"
-
-def _format_ts(ts):
-    try:
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(int(ts)).strftime("%d %b %Y %H:%M:%S")
-        return str(ts)
-    except Exception:
-        return str(ts)
 
 def show_package_details(api_key, tokens, package_option_code, is_enterprise, option_order = -1):
     active_user = AuthInstance.active_user
@@ -103,61 +94,49 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
     details_table.add_row("Masa Aktif:", str(validity))
     details_table.add_row("Point:", str(package['package_option']['point']))
     details_table.add_row("Plan Type:", package['package_family']['plan_type'])
-    # Note: Family Code row removed per request (do not display 'Family Code:' label)
+    details_table.add_row("Family Code:", family_code)
     details_table.add_row("Parent Code:", parent_code)
 
     print_cyber_panel(details_table, title="DETAIL PAKET")
 
     benefits = package["package_option"]["benefits"]
     if benefits and isinstance(benefits, list):
-        benefit_table = Table(show_header=True, header_style="neon_pink", box=None)
-        benefit_table.add_column("Benefit Name", style="white")
-        benefit_table.add_column("Total/Quota", style="neon_green")
-        benefit_table.add_column("Type", style="dim")
+        benefit_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0,1))
+        benefit_table.add_column("Nama Benefit", style="white")
+        benefit_table.add_column("Jenis", style="dim", width=10)
+        benefit_table.add_column("Kuota", style="neon_green")
         benefit_table.add_column("Progress", style="neon_green")
 
         for benefit in benefits:
             total_display = ""
-            data_type = benefit['data_type']
+            data_type = benefit.get('data_type', '')
             remaining = benefit.get('remaining', benefit.get('total', 0))
             total = benefit.get('total', 0)
-            used = (total - remaining) if isinstance(total, (int, float)) else 0
+            used = (total - remaining) if total is not None else 0
 
-            if data_type == "VOICE" and benefit.get('total', 0) > 0:
-                total_display = f"{benefit['total']/60} menit"
-            elif data_type == "TEXT" and benefit.get('total', 0) > 0:
-                total_display = f"{benefit['total']} SMS"
-            elif data_type == "DATA" and benefit.get('total', 0) > 0:
-                quota = int(benefit['total'])
-                # It is in byte, make it in GB/MB/KB
-                if quota >= 1_000_000_000:
-                    quota_gb = quota / (1024 ** 3)
-                    total_display = f"{quota_gb:.2f} GB"
-                elif quota >= 1_000_000:
-                    quota_mb = quota / (1024 ** 2)
-                    total_display = f"{quota_mb:.2f} MB"
-                elif quota >= 1_000:
-                    quota_kb = quota / 1024
-                    total_display = f"{quota_kb:.2f} KB"
-                else:
-                    total_display = f"{quota} B"
-            elif data_type not in ["DATA", "VOICE", "TEXT"]:
-                total_display = f"{benefit.get('total', 0)}"
-            
+            # Format total_display using format_quota_byte for DATA, else unit fallback
+            if data_type == "DATA":
+                total_display = f"{format_quota_byte(remaining)} / {format_quota_byte(total)}"
+            elif data_type == "VOICE":
+                total_display = f"{remaining/60:.1f}m / {total/60:.1f}m"
+            elif data_type == "TEXT":
+                total_display = f"{remaining} / {total} SMS"
+            else:
+                total_display = f"{remaining} / {total}"
+
             if benefit.get("is_unlimited", False):
                 total_display = "Unlimited"
                 progress = _render_progress_bar(0, 1, width=20)
             else:
                 progress = _render_progress_bar(used, total, width=20)
 
-            benefit_table.add_row(benefit.get('name'), total_display, data_type, progress)
+            benefit_table.add_row(benefit.get('name',"N/A"), data_type, total_display, progress)
 
         print_cyber_panel(benefit_table, title="BENEFITS")
     
     with loading_animation("Checking addons..."):
         addons = get_addons(api_key, tokens, package_option_code)
     
-    # Show TnC
     console.print(Panel(detail, title="[neon_pink]SnK MyXL[/]", border_style="dim white"))
     
     in_package_detail_menu = True
@@ -506,3 +485,307 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
             return False
     pause()
     sys.exit(0)
+
+def get_packages_by_family(
+    family_code: str,
+    is_enterprise: bool | None = None,
+    migration_type: str | None = None
+):
+    api_key = AuthInstance.api_key
+    tokens = AuthInstance.get_active_tokens()
+    if not tokens:
+        console.print("[error]No active user tokens found.[/]")
+        pause()
+        return None
+    
+    packages = []
+    
+    with loading_animation("Fetching family packages..."):
+        data = get_family(
+            api_key,
+            tokens,
+            family_code,
+            is_enterprise,
+            migration_type
+        )
+    
+    if not data:
+        console.print("[error]Failed to load family data.[/]")
+        pause()
+        return None
+
+    price_currency = "Rp"
+    rc_bonus_type = data["package_family"].get("rc_bonus_type", "")
+    if rc_bonus_type == "MYREWARDS":
+        price_currency = "Poin"
+    
+    in_package_menu = True
+    while in_package_menu:
+        clear_screen()
+
+        # Family Info Panel
+        family_table = Table(show_header=False, box=None)
+        family_table.add_column("Key", style="neon_cyan", justify="right")
+        family_table.add_column("Value", style="bold white")
+
+        family_table.add_row("Family Name:", data['package_family']['name'])
+        family_table.add_row("Family Code:", family_code)
+        family_table.add_row("Family Type:", data['package_family']['package_family_type'])
+        family_table.add_row("Variant Count:", str(len(data['package_variants'])))
+
+        print_cyber_panel(family_table, title="FAMILY INFO")
+
+        # Packages List
+        pkg_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0, 1))
+        pkg_table.add_column("No", style="neon_green", justify="right", width=4)
+        pkg_table.add_column("Package Name", style="bold white")
+        pkg_table.add_column("Price", style="yellow")
+        
+        package_variants = data["package_variants"]
+        
+        option_number = 1
+
+        # Rebuild packages list each render to ensure correct indexing if needed,
+        # though strictly speaking it's static per fetch.
+        packages = []
+        
+        for variant in package_variants:
+            variant_name = variant["name"]
+            # pkg_table.add_row("", f"[dim]{variant_name}[/]", "") # Section header style
+
+            for option in variant["package_options"]:
+                option_name = option["name"]
+                price_display = f"{price_currency} {option['price']}"
+
+                full_name = f"{variant_name} - {option_name}"
+                
+                packages.append({
+                    "number": option_number,
+                    "variant_name": variant_name,
+                    "option_name": option_name,
+                    "price": option["price"],
+                    "code": option["package_option_code"],
+                    "option_order": option["order"]
+                })
+                                
+                pkg_table.add_row(str(option_number), full_name, price_display)
+                option_number += 1
+
+        print_cyber_panel(pkg_table, title="AVAILABLE PACKAGES")
+
+        console.print("[dim]00. Kembali ke menu utama[/]")
+        pkg_choice = cyber_input("Pilih paket (nomor)")
+        if pkg_choice == "00":
+            in_package_menu = False
+            return None
+        
+        if isinstance(pkg_choice, str) == False or not pkg_choice.isdigit():
+            console.print("[error]Input tidak valid. Silakan masukan nomor paket.[/]")
+            pause()
+            continue
+        
+        selected_pkg = next((p for p in packages if p["number"] == int(pkg_choice)), None)
+        
+        if not selected_pkg:
+            console.print("[error]Paket tidak ditemukan. Silakan masukan nomor yang benar.[/]")
+            pause()
+            continue
+        
+        show_package_details(
+            api_key,
+            tokens,
+            selected_pkg["code"],
+            is_enterprise,
+            option_order=selected_pkg["option_order"],
+        )
+        
+    return packages
+
+def fetch_my_packages():
+    in_my_packages_menu = True
+    while in_my_packages_menu:
+        api_key = AuthInstance.api_key
+        tokens = AuthInstance.get_active_tokens()
+        if not tokens:
+            console.print("[error]No active user tokens found.[/]")
+            pause()
+            return None
+        
+        id_token = tokens.get("id_token")
+        
+        path = "api/v8/packages/quota-details"
+        
+        payload = {
+            "is_enterprise": False,
+            "lang": "en",
+            "family_member_id": ""
+        }
+        
+        with loading_animation("Fetching my packages..."):
+            res = send_api_request(api_key, path, payload, id_token, "POST")
+
+        if res.get("status") != "SUCCESS":
+            console.print("[error]Failed to fetch packages[/]")
+            console.print_json(data=res)
+            pause()
+            return None
+        
+        quotas = res["data"]["quotas"]
+        
+        clear_screen()
+
+        # --- Paket Aktif header ---
+        try:
+            active_user = AuthInstance.get_active_user() or {}
+            account_number = active_user.get("number", "N/A")
+        except Exception:
+            account_number = "N/A"
+
+        header_table = Table(show_header=False, box=None)
+        header_table.add_column("Value", style="bold white")
+        header_table.add_row(f"Akun aktif: {account_number}")
+        print_cyber_panel(header_table, title="PAKET AKTIF")
+        # --- end header ---
+
+        my_packages = []
+        num = 1
+
+        # If quotas list empty
+        if not quotas:
+            console.print("[warning]No packages found.[/]")
+            pause()
+            return None
+
+        # Show detailed panels for each quota (mendekati tampilan screenshot)
+        for quota in quotas:
+            quota_code = quota.get("quota_code", "")
+            quota_name = quota.get("name", "")
+            product_subscription_type = quota.get("product_subscription_type", "")
+            product_domain = quota.get("product_domain", "")
+
+            # Try to extract extra meta if available
+            family_code = quota.get("family_code", quota.get("package_family_code", ""))
+            group_code = quota.get("group_code", quota.get("package_group_code", ""))
+
+            active_since = quota.get("activated_at", quota.get("active_since", ""))
+            reset_at = quota.get("reset_at", quota.get("reset_quota_at", ""))
+
+            # Detail panel similar to screenshot top block
+            detail_tbl = Table(show_header=False, box=None, padding=(0,1))
+            detail_tbl.add_column("Key", style="neon_cyan", justify="right")
+            detail_tbl.add_column("Value", style="bold white")
+
+            detail_tbl.add_row("Nama:", quota_name)
+            detail_tbl.add_row("Quota Code:", quota_code)
+            if family_code:
+                detail_tbl.add_row("Family Code:", family_code)
+            if group_code:
+                detail_tbl.add_row("Group Code:", group_code)
+            if active_since:
+                detail_tbl.add_row("Aktif Sejak:", str(active_since))
+            if reset_at:
+                detail_tbl.add_row("Reset Kuota:", str(reset_at))
+
+            # Benefits table with progress bars
+            benefits = quota.get("benefits", [])
+            benefit_table = Table(show_header=True, header_style="neon_pink", box=None, padding=(0,1))
+            benefit_table.add_column("Nama", style="white")
+            benefit_table.add_column("Jenis", style="dim", width=12)
+            benefit_table.add_column("Kuota", style="neon_green")
+            benefit_table.add_column("Progress", style="neon_green")
+
+            if not benefits:
+                benefit_table.add_row("No benefits", "", "", "")
+            else:
+                for b in benefits:
+                    bname = b.get("name", "Benefit")
+                    dtype = b.get("data_type", "")
+                    remaining = b.get("remaining", b.get("total", 0))
+                    total = b.get("total", 0)
+                    used = (total - remaining) if isinstance(total, (int,float)) else 0
+
+                    if dtype == "DATA":
+                        kuota_text = f"{format_quota_byte(remaining)} / {format_quota_byte(total)}"
+                    elif dtype == "VOICE":
+                        kuota_text = f"{remaining/60:.2f}m / {total/60:.2f}m"
+                    elif dtype == "TEXT":
+                        kuota_text = f"{remaining} / {total} SMS"
+                    else:
+                        kuota_text = f"{remaining} / {total}"
+
+                    if b.get("is_unlimited", False):
+                        kuota_text = "Unlimited"
+                        progress = _render_progress_bar(0, 1, width=20)
+                    else:
+                        progress = _render_progress_bar(used, total, width=20)
+
+                    benefit_table.add_row(bname, dtype, kuota_text, progress)
+
+            # Print panels
+            print_cyber_panel(detail_tbl, title=f"PAKET {num}")
+            print_cyber_panel(benefit_table, title="RINCIAN KUOTA")
+
+            my_packages.append({
+                "number": num,
+                "name": quota_name,
+                "quota_code": quota_code,
+                "product_subscription_type": product_subscription_type,
+                "product_domain": product_domain,
+                "full_data": quota
+            })
+            num += 1
+
+        console.print(Panel(
+            """[bold white]Input Number[/]: View Detail
+[bold white]del <N>[/]: Unsubscribe
+[bold white]00[/]: Back to Main Menu""",
+            title="ACTIONS",
+            border_style="neon_cyan"
+        ))
+
+        choice = cyber_input("Choice")
+        if choice == "00":
+            in_my_packages_menu = False
+
+        # Handle selecting package to view detail
+        if choice.isdigit() and int(choice) > 0 and int(choice) <= len(my_packages):
+            selected_pkg = next((pkg for pkg in my_packages if pkg["number"] == int(choice)), None)
+            if not selected_pkg:
+                console.print("[error]Paket tidak ditemukan. Silakan masukan nomor yang benar.[/]")
+                pause()
+                continue
+            
+            # Show full details (will open API detail view)
+            _ = show_package_details(api_key, tokens, selected_pkg["quota_code"], False)
+        
+        elif choice.startswith("del "):
+            del_parts = choice.split(" ")
+            if len(del_parts) != 2 or not del_parts[1].isdigit():
+                console.print("[error]Invalid input for delete command.[/]")
+                pause()
+                continue
+            
+            del_number = int(del_parts[1])
+            del_pkg = next((pkg for pkg in my_packages if pkg["number"] == del_number), None)
+            if not del_pkg:
+                console.print("[error]Package not found for deletion.[/]")
+                pause()
+                continue
+            
+            confirm = cyber_input(f"Are you sure you want to unsubscribe from package  {del_number}. {del_pkg['name']}? (y/n)")
+            if confirm.lower() == 'y':
+                with loading_animation(f"Unsubscribing from {del_pkg['name']}..."):
+                    success = unsubscribe(
+                        api_key,
+                        tokens,
+                        del_pkg["quota_code"],
+                        del_pkg["product_subscription_type"],
+                        del_pkg["product_domain"]
+                    )
+                if success:
+                    console.print("[neon_green]Successfully unsubscribed from the package.[/]")
+                else:
+                    console.print("[error]Failed to unsubscribe from the package.[/]")
+            else:
+                console.print("[warning]Unsubscribe cancelled.[/]")
+            pause()
