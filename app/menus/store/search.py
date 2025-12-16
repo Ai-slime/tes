@@ -3,6 +3,7 @@ from app.menus.package import get_packages_by_family, show_package_details
 from app.menus.util import clear_screen, pause
 from app.service.auth import AuthInstance
 from app.console import console, print_cyber_panel, cyber_input, loading_animation
+from app.service.bookmark import BookmarkInstance
 from rich.table import Table
 
 WIDTH = 55
@@ -41,23 +42,96 @@ def show_family_list_menu(
 
         print_cyber_panel(table, title="FAMILY LIST")
         
-        console.print("[dim]00. Back to Main Menu[/]")
-        choice = cyber_input("Input the number to view packages in that family")
+        console.print("[dim]Commands: <number> View | a <number> Add to saved | e <family_code> Edit saved name | d <family_code> Delete saved | 00 Back[/]")
+        choice = cyber_input("Input (e.g. 'a 3' to save family #3)")
         if choice == "00":
             in_family_list_menu = False
             continue
-        
-        if choice.isdigit() and int(choice) > 0 and int(choice) <= len(family_list):
-            selected_family = family_list[int(choice) - 1]
-            family_code = selected_family.get("id", "")
-            family_name = selected_family.get("label", "N/A")
-            
-            console.print(f"[info]Fetching packages for family: {family_name}...[/]")
-            get_packages_by_family(family_code)
-        else:
-             console.print("[error]Invalid choice.[/]")
-             pause()
-    
+
+        parts = choice.strip().split(" ", 1)
+        cmd = parts[0].strip().lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        # Add family to saved/bookmark
+        if cmd == "a" and arg.isdigit():
+            idx = int(arg) - 1
+            if idx < 0 or idx >= len(family_list):
+                console.print("[error]Invalid family number to add.[/]")
+                pause()
+                continue
+            sel = family_list[idx]
+            family_code = sel.get("id", "")
+            default_name = sel.get("label", "")
+            name = cyber_input(f"Nama penyimpanan untuk family (default: {default_name})").strip() or default_name
+            is_enterprise_flag = cyber_input("Is enterprise? (y/n)").strip().lower() == 'y'
+            # Use BookmarkInstance to store family; variant/option/order left empty/default
+            success = BookmarkInstance.add_bookmark(
+                family_code=family_code,
+                family_name=name,
+                is_enterprise=is_enterprise_flag,
+                variant_name="",
+                option_name="",
+                order=0,
+            )
+            if success:
+                console.print("[neon_green]Family saved to bookmarks.[/]")
+            else:
+                console.print("[warning]Family already exists in bookmarks.[/]")
+            pause()
+            continue
+
+        # Edit saved family name
+        if cmd == "e" and arg:
+            family_code = arg
+            updated = False
+            for p in BookmarkInstance.get_bookmarks():
+                if p.get("family_code") == family_code:
+                    new_name = cyber_input(f"Masukkan nama baru (sekarang: {p.get('family_name','')})").strip()
+                    if new_name:
+                        p["family_name"] = new_name
+                        BookmarkInstance.save_bookmark()
+                        console.print("[neon_green]Nama family berhasil diupdate di bookmark.[/]")
+                        updated = True
+                        break
+            if not updated:
+                console.print("[error]Family code tidak ditemukan di bookmarks.[/]")
+            pause()
+            continue
+
+        # Delete saved family
+        if cmd == "d" and arg:
+            family_code = arg
+            removed = False
+            for idx, p in enumerate(BookmarkInstance.get_bookmarks()):
+                if p.get("family_code") == family_code:
+                    del BookmarkInstance.packages[idx]
+                    BookmarkInstance.save_bookmark()
+                    console.print("[neon_green]Family berhasil dihapus dari bookmarks.[/]")
+                    removed = True
+                    break
+            if not removed:
+                console.print("[error]Family code tidak ditemukan di bookmarks.[/]")
+            pause()
+            continue
+
+        # If numeric: view packages for that family
+        if cmd.isdigit():
+            idx = int(cmd) - 1
+            if idx >= 0 and idx < len(family_list):
+                selected_family = family_list[idx]
+                family_code = selected_family.get("id", "")
+                family_name = selected_family.get("label", "N/A")
+                
+                console.print(f"[info]Fetching packages for family: {family_name}...[/]")
+                get_packages_by_family(family_code)
+            else:
+                console.print("[error]Invalid choice.[/]")
+                pause()
+            continue
+
+        console.print("[error]Invalid input or command.[/]")
+        pause()
+        continue
 
 def show_store_packages_menu(
     subs_type: str = "PREPAID",
