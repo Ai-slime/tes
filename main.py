@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from app.service.git import check_for_updates
 load_dotenv()
 
-import sys, json
+import sys, json, os
 from datetime import datetime
 from app.menus.util import clear_screen, pause
 from app.client.engsel import (
@@ -14,6 +14,7 @@ from app.client.famplan import validate_msisdn
 from app.menus.payment import show_transaction_history
 from app.service.auth import AuthInstance
 from app.menus.bookmark import show_bookmark_menu
+from app.service.bookmark import BookmarkInstance
 from app.menus.account import show_account_menu
 from app.menus.package import fetch_my_packages, get_packages_by_family, show_package_details
 from app.menus.hot import show_hot_menu, show_hot_menu2
@@ -36,6 +37,41 @@ from app.console import console, print_cyber_panel, cyber_input, loading_animati
 
 WIDTH = 55
 
+def _get_name_from_refresh_file(number):
+    """
+    Read refresh-tokens.json and return the 'name' for the given number if present.
+    Fallback to AuthInstance.refresh_tokens if file not present or parsing fails.
+    """
+    try:
+        if os.path.exists("refresh-tokens.json"):
+            with open("refresh-tokens.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for entry in data:
+                    # number in file may be int or string
+                    try:
+                        entry_number = int(entry.get("number")) if entry.get("number") is not None else None
+                    except Exception:
+                        entry_number = None
+                    if entry_number == int(number):
+                        name = entry.get("name", "") or entry.get("display_name", "") or ""
+                        return name
+    except Exception:
+        pass
+
+    # fallback: use in-memory AuthInstance refresh_tokens
+    try:
+        for rt in AuthInstance.refresh_tokens:
+            try:
+                rt_num = int(rt.get("number", -1))
+            except Exception:
+                rt_num = -1
+            if rt_num == int(number):
+                return rt.get("name", "") or ""
+    except Exception:
+        pass
+
+    return ""
+
 def show_main_menu(profile):
     clear_screen()
 
@@ -47,6 +83,8 @@ def show_main_menu(profile):
     profile_table.add_column("Value", style="bold white")
 
     profile_table.add_row("Nomor:", str(profile['number']))
+    # NEW: show account name if available (use active_user name from API first)
+    profile_table.add_row("Nama Akun:", str(profile.get('account_name', 'N/A')))
     profile_table.add_row("Type:", str(profile['subscription_type']))
     profile_table.add_row("Pulsa:", f"Rp {profile['balance']}")
     profile_table.add_row("Aktif s/d:", str(expired_at_dt))
@@ -77,6 +115,7 @@ def show_main_menu(profile):
         ("15", "Store Family List"),
         ("16", "Store Packages"),
         ("17", "Redemables"),
+        ("18", "Simpan Family Code"),  # <-- new menu item
         ("S", "Biz Stat"),
         #("TF", "Teanfer Pulsa"),
         ("R", "Register Dukcapil"),
@@ -114,13 +153,28 @@ def main():
                     current_point = tiering_data.get("current_point", 0)
                     point_info = f"Points: {current_point} | Tier: {tier}"
             
+            # Prefer name from active_user fetched from API (set_active_user stores it)
+            account_name = ""
+            try:
+                account_name = active_user.get("name", "") or ""
+            except Exception:
+                account_name = ""
+
+            # fallback: read from refresh-tokens.json if active_user doesn't have name
+            if not account_name:
+                try:
+                    account_name = _get_name_from_refresh_file(active_user.get("number", ""))
+                except Exception:
+                    account_name = ""
+
             profile = {
                 "number": active_user["number"],
                 "subscriber_id": active_user["subscriber_id"],
                 "subscription_type": active_user["subscription_type"],
                 "balance": balance_remaining,
                 "balance_expired_at": balance_expired_at,
-                "point_info": point_info
+                "point_info": point_info,
+                "account_name": account_name
             }
 
             show_main_menu(profile)
@@ -219,6 +273,34 @@ def main():
                 input_14_1 = cyber_input("Is enterprise? (y/n)").lower()
                 is_enterprise = input_14_1 == 'y'            
                 show_redeemables_menu(is_enterprise)
+            elif choice == "18":
+                # Save Family Code to bookmark (new)
+                family_code = cyber_input("Masukkan Family Code (atau '99' untuk batal)").strip()
+                if family_code == "99" or family_code == "":
+                    continue
+                family_name = cyber_input("Masukkan Family Name (opsional)").strip()
+                variant_name = cyber_input("Masukkan Variant Name (opsional)").strip()
+                option_name = cyber_input("Masukkan Option Name (opsional)").strip()
+                order_str = cyber_input("Masukkan Order (angka, default 0)").strip()
+                try:
+                    order = int(order_str) if order_str != "" else 0
+                except ValueError:
+                    order = 0
+                is_enterprise = cyber_input("Is enterprise? (y/n)").strip().lower() == 'y'
+
+                success = BookmarkInstance.add_bookmark(
+                    family_code=family_code,
+                    family_name=family_name,
+                    is_enterprise=is_enterprise,
+                    variant_name=variant_name,
+                    option_name=option_name,
+                    order=order,
+                )
+                if success:
+                    console.print("[neon_green]Family code berhasil disimpan ke bookmark.[/]")
+                else:
+                    console.print("[warning]Family code sudah ada di bookmark atau gagal disimpan.[/]")
+                pause()
             elif choice == "00":
                 show_bookmark_menu()
             elif choice == "99":
